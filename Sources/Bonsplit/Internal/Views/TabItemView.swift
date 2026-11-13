@@ -4,6 +4,7 @@ import SwiftUI
 struct TabItemView: View {
     let tab: TabItem
     let isSelected: Bool
+    let canClose: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -94,14 +95,14 @@ struct TabItemView: View {
     private var closeOrDirtyIndicator: some View {
         ZStack {
             // Dirty indicator (shown when dirty and not hovering)
-            if tab.isDirty && !isHovered && !isCloseHovered {
+            if tab.isDirty && (!canClose || (!isHovered && !isCloseHovered)) {
                 Circle()
                     .fill(TabBarColors.dirtyIndicator)
                     .frame(width: TabBarMetrics.dirtyIndicatorSize, height: TabBarMetrics.dirtyIndicatorSize)
             }
 
             // Close button (shown on hover)
-            if isHovered || isCloseHovered {
+            if canClose && (isHovered || isCloseHovered) {
                 Button {
                     onClose()
                 } label: {

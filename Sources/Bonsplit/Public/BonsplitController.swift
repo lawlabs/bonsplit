@@ -36,7 +36,7 @@ public final class BonsplitController {
     ///   - icon: Optional SF Symbol name for the tab icon
     ///   - isDirty: Whether the tab shows a dirty indicator
     ///   - pane: Optional pane to add the tab to (defaults to focused pane)
-    /// - Returns: The TabID of the created tab, or nil if creation was vetoed by delegate
+    /// - Returns: The new tab ID, or nil if the target pane is missing or creation is vetoed.
     @discardableResult
     public func createTab(
         title: String,
@@ -44,22 +44,24 @@ public final class BonsplitController {
         isDirty: Bool = false,
         inPane pane: PaneID? = nil
     ) -> TabID? {
+        guard let targetPane = pane ?? focusedPaneId ?? allPaneIds.first,
+              internalController.rootNode.findPane(targetPane) != nil else { return nil }
+
         let tabId = TabID()
         let tab = Tab(id: tabId, title: title, icon: icon, isDirty: isDirty)
-        let targetPane = pane ?? focusedPaneId ?? PaneID(id: internalController.rootNode.allPaneIds.first!.id)
 
         // Check with delegate
         if delegate?.splitTabBar(self, shouldCreateTab: tab, inPane: targetPane) == false {
             return nil
         }
+        guard let paneState = internalController.rootNode.findPane(targetPane) else { return nil }
 
         // Calculate insertion index based on configuration
         let insertIndex: Int?
         switch configuration.newTabPosition {
         case .current:
             // Insert after the currently selected tab
-            if let paneState = internalController.rootNode.findPane(PaneID(id: targetPane.id)),
-               let selectedTabId = paneState.selectedTabId,
+            if let selectedTabId = paneState.selectedTabId,
                let currentIndex = paneState.tabs.firstIndex(where: { $0.id == selectedTabId }) {
                 insertIndex = currentIndex + 1
             } else {
@@ -72,7 +74,7 @@ public final class BonsplitController {
 
         // Create internal TabItem
         let tabItem = TabItem(id: tabId.id, title: title, icon: icon, isDirty: isDirty)
-        internalController.addTab(tabItem, toPane: PaneID(id: targetPane.id), atIndex: insertIndex)
+        internalController.addTab(tabItem, toPane: targetPane, atIndex: insertIndex)
 
         // Notify delegate
         delegate?.splitTabBar(self, didCreateTab: tab, inPane: targetPane)
@@ -131,6 +133,7 @@ public final class BonsplitController {
     /// - Parameter tabIndex: The position of the tab within the pane
     /// - Parameter pane: The pane in which to close the tab
     private func closeTab(_ tabId: TabID, with tabIndex: Int, in pane: PaneState) -> Bool {
+        guard configuration.allowCloseTabs else { return false }
         let tabItem = pane.tabs[tabIndex]
         let tab = Tab(from: tabItem)
         let paneId = pane.id
@@ -140,10 +143,15 @@ public final class BonsplitController {
             return false
         }
 
-        internalController.closeTab(tabId.id, inPane: pane.id)
+        guard let currentPane = internalController.rootNode.findPane(paneId),
+              currentPane.removeTab(tabId.id) != nil else { return false }
+        let closedPane = closeEmptyPane(currentPane)
 
-        // Notify delegate
         delegate?.splitTabBar(self, didCloseTab: tabId, fromPane: paneId)
+        if closedPane {
+            delegate?.splitTabBar(self, didClosePane: paneId)
+            notifyGeometryAfterLayout()
+        }
 
         return true
     }
@@ -154,10 +162,8 @@ public final class BonsplitController {
         guard let (pane, tabIndex) = findTabInternal(tabId) else { return }
 
         pane.selectTab(tabId.id)
-        internalController.focusPane(pane.id)
-
-        // Notify delegate
         let tab = Tab(from: pane.tabs[tabIndex])
+        focusPane(pane.id)
         delegate?.splitTabBar(self, didSelectTab: tab, inPane: pane.id)
     }
 
@@ -219,50 +225,31 @@ public final class BonsplitController {
     /// - Parameters:
     ///   - paneId: Optional pane to split (defaults to focused pane)
     ///   - orientation: Direction to split (horizontal = side-by-side, vertical = stacked)
-    ///   - tab: Optional tab to add to the new pane
-    /// - Returns: The new pane ID, or nil if vetoed by delegate
+    ///   - tab: Optional new tab. Its ID must be unique in this controller.
+    /// - Returns: The new pane ID, or nil if the split could not be created.
     @discardableResult
     public func splitPane(
         _ paneId: PaneID? = nil,
         orientation: SplitOrientation,
         withTab tab: Tab? = nil
     ) -> PaneID? {
-        guard configuration.allowSplits else { return nil }
-
-        let targetPaneId = paneId ?? focusedPaneId
-        guard let targetPaneId else { return nil }
-
-        // Check with delegate
-        if delegate?.splitTabBar(self, shouldSplitPane: targetPaneId, orientation: orientation) == false {
-            return nil
-        }
+        guard let targetPaneId = paneId ?? focusedPaneId,
+              canSplitPane(targetPaneId, orientation: orientation) else { return nil }
 
         let internalTab: TabItem?
         if let tab {
+            guard findTabInternal(tab.id) == nil else { return nil }
             internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
         } else {
             internalTab = nil
         }
 
-        // Perform split
-        internalController.splitPane(
-            PaneID(id: targetPaneId.id),
-            orientation: orientation,
-            with: internalTab
-        )
-
-        // Find new pane (will be focused after split)
-        let newPaneId = focusedPaneId!
-
-        // Notify delegate
-        delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
-
-        // Notify geometry change after a brief delay to allow layout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.notifyGeometryChange()
-        }
-
-        return newPaneId
+        guard let newPane = internalController.splitPane(
+            targetPaneId, orientation: orientation, with: internalTab
+        ) else { return nil }
+        delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPane.id, orientation: orientation)
+        notifyGeometryAfterLayout()
+        return newPane.id
     }
 
     /// Close a specific pane
@@ -270,27 +257,106 @@ public final class BonsplitController {
     /// - Returns: true if the pane was closed, false if vetoed by delegate
     @discardableResult
     public func closePane(_ paneId: PaneID) -> Bool {
-        // Don't close if it's the last pane and not allowed
-        if !configuration.allowCloseLastPane && internalController.rootNode.allPaneIds.count <= 1 {
-            return false
-        }
-
-        // Check with delegate
-        if delegate?.splitTabBar(self, shouldClosePane: paneId) == false {
-            return false
-        }
-
-        internalController.closePane(PaneID(id: paneId.id))
-
-        // Notify delegate
+        guard internalController.rootNode.findPane(paneId) != nil,
+              configuration.allowCloseLastPane || allPaneIds.count > 1,
+              delegate?.splitTabBar(self, shouldClosePane: paneId) != false,
+              internalController.closePane(paneId) else { return false }
         delegate?.splitTabBar(self, didClosePane: paneId)
+        notifyGeometryAfterLayout()
+        return true
+    }
 
-        // Notify geometry change after a brief delay to allow layout
+    // MARK: - Drag and Drop
+
+    internal func canDropTab(into paneId: PaneID, splitting: Bool = false) -> Bool {
+        guard let transfer = internalController.tabDrag,
+              let source = internalController.rootNode.findPane(transfer.sourcePaneId),
+              source.tabs.contains(where: { $0.id == transfer.tabId.id }) else { return false }
+        if splitting {
+            return configuration.allowSplits && configuration.allowCrossPaneTabMove
+                && (source.id != paneId || source.tabs.count > 1)
+        }
+        return source.id == paneId ? configuration.allowTabReordering : configuration.allowCrossPaneTabMove
+    }
+
+    internal func dropTab(_ transfer: TabTransferData, into paneId: PaneID, at index: Int?) {
+        guard let source = sourceOfDrop(transfer),
+              let destination = internalController.rootNode.findPane(paneId) else { return }
+
+        if source.id == paneId {
+            guard configuration.allowTabReordering,
+                  let sourceIndex = source.tabs.firstIndex(where: { $0.id == transfer.tabId.id }) else { return }
+            source.moveTab(from: sourceIndex, to: index ?? source.tabs.count)
+            if index == nil { selectTab(transfer.tabId) }
+            return
+        }
+
+        let previousFocus = focusedPaneId
+        guard configuration.allowCrossPaneTabMove,
+              let tab = internalController.moveTab(transfer.tabId, from: source, to: destination, at: index) else { return }
+        let closedPane = closeEmptyPane(source)
+        notifyTabMove(tab, from: source.id, to: destination.id, sourceClosed: closedPane, previousFocus: previousFocus)
+    }
+
+    internal func dropTab(_ transfer: TabTransferData, beside paneId: PaneID, orientation: SplitOrientation, insertFirst: Bool) {
+        guard let source = sourceOfDrop(transfer),
+              configuration.allowCrossPaneTabMove,
+              source.id != paneId || source.tabs.count > 1,
+              canSplitPane(paneId, orientation: orientation) else { return }
+
+        // A delegate can change the layout while deciding whether to allow the split.
+        let previousFocus = focusedPaneId
+        guard configuration.allowCrossPaneTabMove,
+              liveSource(for: transfer) === source,
+              source.id != paneId || source.tabs.count > 1,
+              let destination = internalController.splitPane(paneId, orientation: orientation, insertFirst: insertFirst),
+              let tab = internalController.moveTab(transfer.tabId, from: source, to: destination, at: nil) else { return }
+
+        let closedPane = closeEmptyPane(source)
+        delegate?.splitTabBar(self, didSplitPane: paneId, newPane: destination.id, orientation: orientation)
+        notifyTabMove(tab, from: source.id, to: destination.id, sourceClosed: closedPane, previousFocus: previousFocus)
+    }
+
+    private func sourceOfDrop(_ transfer: TabTransferData) -> PaneState? {
+        guard internalController.tabDrag == transfer else { return nil }
+        internalController.tabDrag = nil
+        return liveSource(for: transfer)
+    }
+
+    private func liveSource(for transfer: TabTransferData) -> PaneState? {
+        guard let (source, _) = findTabInternal(transfer.tabId),
+              source.id == transfer.sourcePaneId else { return nil }
+        return source
+    }
+
+    private func notifyTabMove(
+        _ tab: TabItem, from source: PaneID, to destination: PaneID, sourceClosed: Bool, previousFocus: PaneID?
+    ) {
+        if sourceClosed { delegate?.splitTabBar(self, didClosePane: source) }
+        delegate?.splitTabBar(self, didMoveTab: Tab(from: tab), fromPane: source, toPane: destination)
+        if focusedPaneId == destination, previousFocus != destination {
+            delegate?.splitTabBar(self, didFocusPane: destination)
+        }
+        notifyGeometryAfterLayout()
+    }
+
+    private func canSplitPane(_ paneId: PaneID, orientation: SplitOrientation) -> Bool {
+        guard configuration.allowSplits, internalController.rootNode.findPane(paneId) != nil else { return false }
+        let allowed = delegate?.splitTabBar(self, shouldSplitPane: paneId, orientation: orientation) != false
+        return allowed && configuration.allowSplits
+    }
+
+    private func closeEmptyPane(_ pane: PaneState) -> Bool {
+        guard configuration.autoCloseEmptyPanes, pane.tabs.isEmpty, allPaneIds.count > 1,
+              delegate?.splitTabBar(self, shouldClosePane: pane.id) != false,
+              configuration.autoCloseEmptyPanes, pane.tabs.isEmpty else { return false }
+        return internalController.closePane(pane.id)
+    }
+
+    private func notifyGeometryAfterLayout() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.notifyGeometryChange()
         }
-
-        return true
     }
 
     // MARK: - Focus Management
@@ -303,8 +369,11 @@ public final class BonsplitController {
 
     /// Focus a specific pane
     public func focusPane(_ paneId: PaneID) {
-        internalController.focusPane(PaneID(id: paneId.id))
-        delegate?.splitTabBar(self, didFocusPane: paneId)
+        let previous = focusedPaneId
+        internalController.focusPane(paneId)
+        if focusedPaneId == paneId, previous != paneId {
+            delegate?.splitTabBar(self, didFocusPane: paneId)
+        }
     }
 
     /// Navigate focus in a direction
