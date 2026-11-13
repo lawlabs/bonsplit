@@ -235,10 +235,9 @@ class MyDelegate: BonsplitDelegate {
                      didSplitPane originalPane: PaneID,
                      newPane: PaneID,
                      orientation: SplitOrientation) {
-        // Option 1: Auto-create a tab
-        controller.createTab(title: "Untitled", icon: "doc.text", inPane: newPane)
-
-        // Option 2: Leave empty - the emptyPane view will be shown
+        if controller.tabs(inPane: newPane).isEmpty {
+            controller.createTab(title: "Untitled", icon: "doc.text", inPane: newPane)
+        }
     }
 }
 ```
@@ -256,7 +255,7 @@ All delegate methods have default implementations and are optional.
 | `didSelectTab` | Called when a tab is selected. |
 | `didMoveTab` | Called when a tab is moved between panes. |
 | `shouldSplitPane` | Called before creating a split. Return `false` to prevent. |
-| `didSplitPane` | Called after a split is created. Use this to create a tab in the new empty pane. |
+| `didSplitPane` | Called after a split is created. An edge drop already puts the moved tab in the new pane. |
 | `shouldClosePane` | Called before closing a pane. Return `false` to prevent. |
 | `didClosePane` | Called after a pane is closed. |
 | `didFocusPane` | Called when focus changes to a different pane. |

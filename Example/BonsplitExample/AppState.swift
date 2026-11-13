@@ -154,11 +154,9 @@ extension AppState: BonsplitDelegate {
                      didSplitPane originalPane: PaneID,
                      newPane: PaneID,
                      orientation: SplitOrientation) {
-        // Option 1: Auto-create a tab in the new pane
-        newTab(inPane: newPane)
-
-        // Option 2: Leave the pane empty and let user create content
-        // (The emptyPane view will be shown - see ContentView)
+        if controller.tabs(inPane: newPane).isEmpty {
+            newTab(inPane: newPane)
+        }
     }
 
     func splitTabBar(_ controller: BonsplitController,
