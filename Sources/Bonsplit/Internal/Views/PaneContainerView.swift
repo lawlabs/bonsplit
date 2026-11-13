@@ -65,15 +65,22 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
             let size = geometry.size
 
             ZStack {
-                // Main content
                 contentArea
-
-                // Drop zones layer (above content, receives drops and taps)
-                dropZonesLayer(size: size)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded {
+                        bonsplit.focusPane(pane.id)
+                    })
+                    .onDrop(of: [TabDragProvider.contentType], delegate: UnifiedPaneDropDelegate(
+                        size: size,
+                        paneId: pane.id,
+                        controller: bonsplit,
+                        activeDropZone: $activeDropZone
+                    ))
 
                 // Visual placeholder (non-interactive)
                 dropPlaceholder(for: activeDropZone, in: size)
                     .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
             .frame(width: size.width, height: size.height)
         }
@@ -92,6 +99,7 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
                 // Original behavior: only render selected tab
                 if let selectedTab = pane.selectedTab {
                     contentBuilder(selectedTab, pane.id)
+                        .id(selectedTab.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
@@ -103,27 +111,11 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .opacity(tab.id == pane.selectedTabId ? 1 : 0)
                             .allowsHitTesting(tab.id == pane.selectedTabId)
+                            .accessibilityHidden(tab.id != pane.selectedTabId)
                     }
                 }
             }
         }
-    }
-
-    // MARK: - Drop Zones Layer
-
-    @ViewBuilder
-    private func dropZonesLayer(size: CGSize) -> some View {
-        // Single unified drop zone that determines zone based on position
-        Color.clear
-            .onTapGesture {
-                bonsplit.focusPane(pane.id)
-            }
-            .onDrop(of: [TabDragProvider.contentType], delegate: UnifiedPaneDropDelegate(
-                size: size,
-                paneId: pane.id,
-                controller: bonsplit,
-                activeDropZone: $activeDropZone
-            ))
     }
 
     // MARK: - Drop Placeholder
@@ -150,14 +142,16 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
             }
         }()
 
+        let width = max(0, frame.size.width)
+        let height = max(0, frame.size.height)
         RoundedRectangle(cornerRadius: 8)
             .fill(placeholderColor)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(borderColor, lineWidth: 2)
             )
-            .frame(width: frame.width, height: frame.height)
-            .position(x: frame.midX, y: frame.midY)
+            .frame(width: width, height: height)
+            .position(x: frame.origin.x + width / 2, y: frame.origin.y + height / 2)
             .opacity(zone != nil ? 1 : 0)
             .animation(.spring(duration: 0.25, bounce: 0.15), value: zone)
     }
@@ -180,10 +174,9 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     @Binding var activeDropZone: DropZone?
 
     // Calculate zone based on position within the view
-    private func zoneForLocation(_ location: CGPoint) -> DropZone {
-        let edgeRatio: CGFloat = 0.25
-        let horizontalEdge = max(80, size.width * edgeRatio)
-        let verticalEdge = max(80, size.height * edgeRatio)
+    func zoneForLocation(_ location: CGPoint) -> DropZone {
+        let horizontalEdge = size.width * 0.25
+        let verticalEdge = size.height * 0.25
 
         // Check edges first (left/right take priority at corners)
         if location.x < horizontalEdge {
@@ -200,9 +193,9 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        let zone = zoneForLocation(info.location)
+        let zone = allowedZone(at: info.location)
         activeDropZone = nil
-        guard controller.canDropTab(into: paneId, splitting: zone != .center) else { return false }
+        guard let zone else { return false }
 
         return TabDragProvider.load(from: info) { transfer in
             if let orientation = zone.orientation {
@@ -216,7 +209,7 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     }
 
     func dropEntered(info: DropInfo) {
-        updateDropZone(at: info.location)
+        activeDropZone = allowedZone(at: info.location)
     }
 
     func dropExited(info: DropInfo) {
@@ -224,7 +217,7 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        updateDropZone(at: info.location)
+        activeDropZone = allowedZone(at: info.location)
         return DropProposal(operation: activeDropZone == nil ? .forbidden : .move)
     }
 
@@ -232,8 +225,14 @@ struct UnifiedPaneDropDelegate: DropDelegate {
         info.hasItemsConforming(to: [TabDragProvider.contentType]) && controller.internalController.tabDrag != nil
     }
 
-    private func updateDropZone(at location: CGPoint) {
+    func allowedZone(at location: CGPoint) -> DropZone? {
         let zone = zoneForLocation(location)
-        activeDropZone = controller.canDropTab(into: paneId, splitting: zone != .center) ? zone : nil
+        if zone != .center {
+            if controller.canDropTab(into: paneId, splitting: true) { return zone }
+            // With splits disabled, the content area still accepts moves between panes.
+            guard !controller.configuration.allowSplits,
+                  controller.internalController.tabDrag?.sourcePaneId != paneId else { return nil }
+        }
+        return controller.canDropTab(into: paneId) ? .center : nil
     }
 }

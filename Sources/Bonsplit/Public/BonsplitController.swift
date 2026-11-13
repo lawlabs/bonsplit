@@ -260,7 +260,7 @@ public final class BonsplitController {
         guard internalController.rootNode.findPane(paneId) != nil,
               configuration.allowCloseLastPane || allPaneIds.count > 1,
               delegate?.splitTabBar(self, shouldClosePane: paneId) != false,
-              internalController.closePane(paneId) else { return false }
+              internalController.closePane(paneId, allowLastPane: configuration.allowCloseLastPane) else { return false }
         delegate?.splitTabBar(self, didClosePane: paneId)
         notifyGeometryAfterLayout()
         return true
@@ -269,9 +269,9 @@ public final class BonsplitController {
     // MARK: - Drag and Drop
 
     internal func canDropTab(into paneId: PaneID, splitting: Bool = false) -> Bool {
-        guard let transfer = internalController.tabDrag,
-              let source = internalController.rootNode.findPane(transfer.sourcePaneId),
-              source.tabs.contains(where: { $0.id == transfer.tabId.id }) else { return false }
+        guard internalController.rootNode.findPane(paneId) != nil,
+              let transfer = internalController.tabDrag,
+              let source = liveSource(for: transfer) else { return false }
         if splitting {
             return configuration.allowSplits && configuration.allowCrossPaneTabMove
                 && (source.id != paneId || source.tabs.count > 1)
@@ -324,8 +324,8 @@ public final class BonsplitController {
     }
 
     private func liveSource(for transfer: TabTransferData) -> PaneState? {
-        guard let (source, _) = findTabInternal(transfer.tabId),
-              source.id == transfer.sourcePaneId else { return nil }
+        guard let source = internalController.rootNode.findPane(transfer.sourcePaneId),
+              source.tabs.contains(where: { $0.id == transfer.tabId.id }) else { return nil }
         return source
     }
 

@@ -1,6 +1,25 @@
 import SwiftUI
 import AppKit
 
+/// A new split can be mounted before SwiftUI gives it a usable frame.
+final class LayoutAwareSplitView: NSSplitView {
+    var onLayout: (() -> Void)?
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    // Pane content adapts to the space allocated by the parent layout.
+    override var fittingSize: NSSize {
+        .zero
+    }
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
 /// SwiftUI wrapper around NSSplitView for native split behavior
 struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentable {
     @Bindable var splitState: SplitState
@@ -9,18 +28,24 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
     let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
+    var appearance: BonsplitConfiguration.Appearance = .default
     /// Callback when geometry changes. Bool indicates if change is during active divider drag.
     var onGeometryChange: ((_ isDragging: Bool) -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(splitState: splitState, onGeometryChange: onGeometryChange)
+        Coordinator(splitState: splitState, minimumPaneSize: minimumPaneSize, onGeometryChange: onGeometryChange)
     }
 
-    func makeNSView(context: Context) -> NSSplitView {
-        let splitView = NSSplitView()
+    private var minimumPaneSize: CGFloat {
+        splitState.orientation == .horizontal ? appearance.minimumPaneWidth : appearance.minimumPaneHeight
+    }
+
+    func makeNSView(context: Context) -> LayoutAwareSplitView {
+        let splitView = LayoutAwareSplitView()
         splitView.isVertical = splitState.orientation == .horizontal
         splitView.dividerStyle = .thin
-        splitView.delegate = context.coordinator
+        let coordinator = context.coordinator
+        splitView.delegate = coordinator
 
         // First child
         let firstHosting = makeHostingView(for: splitState.first)
@@ -30,66 +55,21 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
         let secondHosting = makeHostingView(for: splitState.second)
         splitView.addArrangedSubview(secondHosting)
 
-        context.coordinator.splitView = splitView
-
-        // Capture animation origin before it gets cleared
-        let animationOrigin = splitState.animationOrigin
-
-        // Determine which pane is new (will be hidden initially)
-        let newPaneIndex = animationOrigin == .fromFirst ? 0 : 1
-
-        if animationOrigin != nil {
-            // Clear immediately so we don't re-animate on updates
-            splitState.animationOrigin = nil
-
-            // Hide the NEW pane immediately to prevent flash
-            splitView.arrangedSubviews[newPaneIndex].isHidden = true
-
-            // Track that we're animating (skip delegate position updates)
-            context.coordinator.isAnimating = true
-        }
-
-        // Wait for view to be added to window
-        DispatchQueue.main.async {
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
-
-            guard totalSize > 0 else { return }
-
-            if animationOrigin != nil {
-                // Position at edge while new pane is hidden
-                let startPosition: CGFloat = animationOrigin == .fromFirst ? 0 : totalSize
-                splitView.setPosition(startPosition, ofDividerAt: 0)
-                splitView.layoutSubtreeIfNeeded()
-
-                let targetPosition = totalSize * 0.5
-                splitState.dividerPosition = 0.5
-
-                // Wait for layout
-                Task {
-                    // Show the new pane and animate
-                    splitView.arrangedSubviews[newPaneIndex].isHidden = false
-
-                    controller.animator.animate(
-                        splitView: splitView,
-                        from: startPosition,
-                        to: targetPosition
-                    ) {
-                        context.coordinator.isAnimating = false
-                    }
-                }
-            } else {
-                // No animation - just set the position
-                let position = totalSize * splitState.dividerPosition
-                splitView.setPosition(position, ofDividerAt: 0)
-            }
-        }
-
+        configureInitialLayout(of: splitView, coordinator: coordinator)
         return splitView
     }
 
-    func updateNSView(_ splitView: NSSplitView, context: Context) {
+    private func configureInitialLayout(of splitView: LayoutAwareSplitView, coordinator: Coordinator) {
+        let animator = controller.animator
+        let duration = appearance.enableAnimations ? appearance.animationDuration : 0
+        splitView.onLayout = { [weak splitView, weak coordinator] in
+            guard let splitView, let coordinator else { return }
+            coordinator.applyInitialPosition(in: splitView, animator: animator, duration: duration)
+        }
+        splitView.needsLayout = true
+    }
+
+    func updateNSView(_ splitView: LayoutAwareSplitView, context: Context) {
         // Update orientation if changed
         splitView.isVertical = splitState.orientation == .horizontal
 
@@ -100,10 +80,14 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
             updateHostingView(subviews[1], for: splitState.second)
         }
 
-        // Access dividerPosition to ensure SwiftUI tracks this dependency
-        // Then sync if the position changed externally
-        let currentPosition = splitState.dividerPosition
-        context.coordinator.syncPosition(currentPosition, in: splitView)
+        let coordinator = context.coordinator
+        let minimumChanged = coordinator.minimumPaneSize != minimumPaneSize
+        coordinator.minimumPaneSize = minimumPaneSize
+        coordinator.onGeometryChange = onGeometryChange
+        if splitView.onLayout != nil {
+            configureInitialLayout(of: splitView, coordinator: coordinator)
+        }
+        coordinator.syncPosition(splitState.dividerPosition, in: splitView, force: minimumChanged)
     }
 
     // MARK: - Helpers
@@ -141,16 +125,20 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
                 emptyPaneBuilder: emptyPaneBuilder,
                 showSplitButtons: showSplitButtons,
                 contentViewLifecycle: contentViewLifecycle,
+                appearance: appearance,
                 onGeometryChange: onGeometryChange
             )
+            .id(nestedSplitState.id)
         }
     }
 
     // MARK: - Coordinator
 
+    @MainActor
     class Coordinator: NSObject, NSSplitViewDelegate {
         let splitState: SplitState
-        weak var splitView: NSSplitView?
+        var minimumPaneSize: CGFloat
+        private var hasInitialPosition = false
         var isAnimating = false
         var onGeometryChange: ((_ isDragging: Bool) -> Void)?
         /// Track last applied position to detect external changes
@@ -158,26 +146,75 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
         /// Track if user is actively dragging the divider
         var isDragging = false
 
-        init(splitState: SplitState, onGeometryChange: ((_ isDragging: Bool) -> Void)?) {
+        init(splitState: SplitState, minimumPaneSize: CGFloat, onGeometryChange: ((_ isDragging: Bool) -> Void)?) {
             self.splitState = splitState
+            self.minimumPaneSize = minimumPaneSize
             self.onGeometryChange = onGeometryChange
             self.lastAppliedPosition = splitState.dividerPosition
         }
 
+        func applyInitialPosition(in splitView: LayoutAwareSplitView, animator: SplitAnimator, duration: TimeInterval) {
+            let size = splitSize(splitView)
+            guard !hasInitialPosition, size > splitView.dividerThickness else { return }
+            hasInitialPosition = true
+            splitView.onLayout = nil
+
+            let target = dividerCoordinate(for: splitState.dividerPosition, in: splitView)
+            let origin = splitState.animationOrigin
+            isAnimating = true
+
+            // Layout can run while SwiftUI is updating. Publish model changes on the next turn.
+            DispatchQueue.main.async { [weak self, weak splitView] in
+                guard let self, let splitView else { return }
+                self.splitState.animationOrigin = nil
+                let currentSize = self.splitSize(splitView)
+                let end = self.dividerCoordinate(for: self.splitState.dividerPosition, in: splitView)
+                if let origin, duration.isFinite, duration > 0,
+                   currentSize > splitView.dividerThickness, splitView.window != nil,
+                   !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    let start = origin == .fromFirst ? 0 : currentSize - splitView.dividerThickness
+                    animator.animate(splitView: splitView, from: start, to: end, duration: duration) { [weak self, weak splitView] in
+                        guard let self, let splitView else { return }
+                        self.finishInitialPosition(in: splitView)
+                    }
+                } else {
+                    self.finishInitialPosition(in: splitView)
+                }
+            }
+
+            splitView.setPosition(target, ofDividerAt: 0)
+        }
+
+        private func finishInitialPosition(in splitView: NSSplitView) {
+            // Re-read the requested position and bounds after an animated layout or window resize.
+            splitView.setPosition(dividerCoordinate(for: splitState.dividerPosition, in: splitView), ofDividerAt: 0)
+            lastAppliedPosition = splitState.dividerPosition
+            isAnimating = false
+            onGeometryChange?(false)
+        }
+
+        private func splitSize(_ splitView: NSSplitView) -> CGFloat {
+            splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+        }
+
+        private func effectiveMinimum(in splitView: NSSplitView) -> CGFloat {
+            let available = max(0, splitSize(splitView) - splitView.dividerThickness)
+            return min(max(0, minimumPaneSize), available / 2)
+        }
+
+        private func dividerCoordinate(for ratio: CGFloat, in splitView: NSSplitView) -> CGFloat {
+            let size = splitSize(splitView)
+            let minimum = effectiveMinimum(in: splitView)
+            return max(minimum, min(size * ratio, size - splitView.dividerThickness - minimum))
+        }
+
         /// Apply external position changes to the NSSplitView
-        func syncPosition(_ statePosition: CGFloat, in splitView: NSSplitView) {
-            guard !isAnimating else { return }
+        func syncPosition(_ statePosition: CGFloat, in splitView: NSSplitView, force: Bool = false) {
+            guard hasInitialPosition, !isAnimating else { return }
 
-            // Check if position changed externally (not from user drag)
-            if abs(statePosition - lastAppliedPosition) > 0.01 {
-                let totalSize = splitState.orientation == .horizontal
-                    ? splitView.bounds.width
-                    : splitView.bounds.height
-
-                guard totalSize > 0 else { return }
-
-                let pixelPosition = totalSize * statePosition
-                splitView.setPosition(pixelPosition, ofDividerAt: 0)
+            if force || abs(statePosition - lastAppliedPosition) > 0.01 {
+                guard splitSize(splitView) > splitView.dividerThickness else { return }
+                splitView.setPosition(dividerCoordinate(for: statePosition, in: splitView), ofDividerAt: 0)
                 splitView.layoutSubtreeIfNeeded()
                 lastAppliedPosition = statePosition
             }
@@ -185,19 +222,17 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
 
         func splitViewWillResizeSubviews(_ notification: Notification) {
             // Detect if this is a user drag by checking mouse state
-            if let event = NSApp.currentEvent, event.type == .leftMouseDragged {
+            if NSApp?.currentEvent?.type == .leftMouseDragged {
                 isDragging = true
             }
         }
 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             // Skip position updates during animation
-            guard !isAnimating else { return }
+            guard hasInitialPosition, !isAnimating else { return }
             guard let splitView = notification.object as? NSSplitView else { return }
 
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
+            let totalSize = splitSize(splitView)
 
             guard totalSize > 0 else { return }
 
@@ -210,7 +245,7 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
 
                 // Check if drag ended (mouse up)
                 let wasDragging = isDragging
-                if let event = NSApp.currentEvent, event.type == .leftMouseUp {
+                if NSApp?.currentEvent?.type == .leftMouseUp {
                     isDragging = false
                 }
 
@@ -226,16 +261,14 @@ struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentabl
         func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
             // Allow edge positions during animation
             guard !isAnimating else { return proposedMinimumPosition }
-            return max(proposedMinimumPosition, TabBarMetrics.minimumPaneWidth)
+            return max(proposedMinimumPosition, effectiveMinimum(in: splitView))
         }
 
         func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
             // Allow edge positions during animation
             guard !isAnimating else { return proposedMaximumPosition }
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
-            return min(proposedMaximumPosition, totalSize - TabBarMetrics.minimumPaneWidth)
+            let maximum = splitSize(splitView) - splitView.dividerThickness - effectiveMinimum(in: splitView)
+            return min(proposedMaximumPosition, maximum)
         }
     }
 }

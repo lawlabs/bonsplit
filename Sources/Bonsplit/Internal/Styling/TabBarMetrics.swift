@@ -31,12 +31,6 @@ enum TabBarMetrics {
     static let dropIndicatorWidth: CGFloat = 2
     static let dropIndicatorHeight: CGFloat = 20
 
-    // MARK: - Split View
-
-    static let minimumPaneWidth: CGFloat = 100
-    static let minimumPaneHeight: CGFloat = 100
-    static let dividerThickness: CGFloat = 1
-
     // MARK: - Animations
 
     static let selectionDuration: Double = 0.15
@@ -45,8 +39,4 @@ enum TabBarMetrics {
     static let reorderBounce: Double = 0.15
     static let hoverDuration: Double = 0.1
 
-    // MARK: - Split Animations (120fps via CADisplayLink)
-
-    /// Duration for split entry animation (fast and snappy like Hyprland)
-    static let splitAnimationDuration: Double = 0.15
 }

@@ -70,6 +70,12 @@ final class SplitAnimator {
     ) -> UUID {
         let id = UUID()
 
+        guard let displayLink else {
+            splitView.setPosition(round(endPosition), ofDividerAt: 0)
+            onComplete?()
+            return id
+        }
+
         splitView.layoutSubtreeIfNeeded()
         splitView.setPosition(round(startPosition), ofDividerAt: 0)
         splitView.layoutSubtreeIfNeeded()
@@ -83,8 +89,10 @@ final class SplitAnimator {
             onComplete: onComplete
         )
 
-        if let displayLink, !CVDisplayLinkIsRunning(displayLink) {
-            CVDisplayLinkStart(displayLink)
+        if !CVDisplayLinkIsRunning(displayLink), CVDisplayLinkStart(displayLink) != kCVReturnSuccess {
+            animations.removeValue(forKey: id)
+            splitView.setPosition(round(endPosition), ofDividerAt: 0)
+            onComplete?()
         }
 
         return id

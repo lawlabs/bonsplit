@@ -3,6 +3,7 @@ import AppKit
 
 /// Recursively renders a split node (pane or split)
 struct SplitNodeView<Content: View, EmptyContent: View>: View {
+    @Environment(BonsplitController.self) private var bonsplit
     @Environment(SplitViewController.self) private var controller
     
     let node: SplitNode
@@ -32,8 +33,10 @@ struct SplitNodeView<Content: View, EmptyContent: View>: View {
                 emptyPaneBuilder: emptyPaneBuilder,
                 showSplitButtons: showSplitButtons,
                 contentViewLifecycle: contentViewLifecycle,
+                appearance: bonsplit.configuration.appearance,
                 onGeometryChange: onGeometryChange
             )
+            .id(splitState.id)
         }
     }
 }

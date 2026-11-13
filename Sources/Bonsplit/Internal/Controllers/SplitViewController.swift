@@ -128,7 +128,6 @@ final class SplitViewController {
                 orientation: orientation,
                 first: insertFirst ? .pane(newPane) : node,
                 second: insertFirst ? node : .pane(newPane),
-                dividerPosition: insertFirst ? 0 : 1,
                 animationOrigin: insertFirst ? .fromFirst : .fromSecond
             ))
         case .split(let split):
@@ -149,16 +148,15 @@ final class SplitViewController {
 
     /// Close a pane and collapse the split
     @discardableResult
-    func closePane(_ paneId: PaneID) -> Bool {
-        // Don't close the last pane
-        guard case .split = rootNode else { return false }
+    func closePane(_ paneId: PaneID, allowLastPane: Bool = false) -> Bool {
+        if case .pane = rootNode {
+            return allowLastPane && clearLastPane(paneId)
+        }
+        guard let result = closingPane(paneId, in: rootNode) else { return false }
 
-        let (newRoot, siblingPaneId) = closePaneRecursively(node: rootNode, targetPaneId: paneId)
-        guard let newRoot, let siblingPaneId else { return false }
-
-        rootNode = newRoot
+        rootNode = result.node
         if focusedPaneId == paneId {
-            focusedPaneId = siblingPaneId
+            focusedPaneId = result.sibling
         }
 
         // Clear zoom if zoomed pane was closed or tree collapsed to single pane
@@ -170,51 +168,34 @@ final class SplitViewController {
         return true
     }
 
-    private func closePaneRecursively(
-        node: SplitNode,
-        targetPaneId: PaneID
-    ) -> (SplitNode?, PaneID?) {
-        switch node {
-        case .pane(let paneState):
-            if paneState.id == targetPaneId {
-                return (nil, nil)
-            }
-            return (node, nil)
+    /// Remove tabs from the last pane while keeping a place to open the next tab.
+    private func clearLastPane(_ paneId: PaneID) -> Bool {
+        guard case .pane(let pane) = rootNode, pane.id == paneId else { return false }
+        let replacement = PaneState()
+        rootNode = .pane(replacement)
+        focusedPaneId = replacement.id
+        zoomedPaneId = nil
+        return true
+    }
 
-        case .split(let splitState):
-            // Check if either direct child is the target
-            if case .pane(let firstPane) = splitState.first, firstPane.id == targetPaneId {
-                let focusTarget = splitState.second.allPaneIds.first
-                return (splitState.second, focusTarget)
-            }
+    private func closingPane(_ paneId: PaneID, in node: SplitNode) -> (node: SplitNode, sibling: PaneID?)? {
+        guard case .split(let split) = node else { return nil }
 
-            if case .pane(let secondPane) = splitState.second, secondPane.id == targetPaneId {
-                let focusTarget = splitState.first.allPaneIds.first
-                return (splitState.first, focusTarget)
-            }
-
-            // Recursively check children
-            let (newFirst, focusFromFirst) = closePaneRecursively(node: splitState.first, targetPaneId: targetPaneId)
-            if newFirst == nil {
-                return (splitState.second, splitState.second.allPaneIds.first)
-            }
-
-            let (newSecond, focusFromSecond) = closePaneRecursively(node: splitState.second, targetPaneId: targetPaneId)
-            if newSecond == nil {
-                return (splitState.first, splitState.first.allPaneIds.first)
-            }
-
-            if let focusFromFirst, let newFirst {
-                splitState.first = newFirst
-                return (.split(splitState), focusFromFirst)
-            }
-            if let focusFromSecond, let newSecond {
-                splitState.second = newSecond
-                return (.split(splitState), focusFromSecond)
-            }
-
-            return (node, nil)
+        if case .pane(let first) = split.first, first.id == paneId {
+            return (split.second, split.second.allPaneIds.first)
         }
+        if case .pane(let second) = split.second, second.id == paneId {
+            return (split.first, split.first.allPaneIds.first)
+        }
+        if let result = closingPane(paneId, in: split.first) {
+            split.first = result.node
+            return (node, result.sibling)
+        }
+        if let result = closingPane(paneId, in: split.second) {
+            split.second = result.node
+            return (node, result.sibling)
+        }
+        return nil
     }
 
     // MARK: - Tab Operations
