@@ -176,7 +176,7 @@ final class TabDropTests: XCTestCase {
     @MainActor
     func testDragProviderRoundTripsTheActiveToken() async throws {
         let transfer = TabTransferData(tabId: TabID(), sourcePaneId: PaneID())
-        let provider = TabDragProvider.make(for: transfer)
+        let provider = TabDragProvider.make(for: transfer) {}
         let data = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
             provider.loadDataRepresentation(forTypeIdentifier: TabDragProvider.contentType.identifier) { data, error in
                 if let data {
@@ -188,6 +188,51 @@ final class TabDropTests: XCTestCase {
         }
         XCTAssertEqual(try JSONDecoder().decode(TabTransferData.self, from: data), transfer)
         XCTAssertFalse(provider.hasItemConformingToTypeIdentifier("public.text"))
+    }
+
+    @MainActor
+    func testDragRemainsActiveWhileAProviderCopyExists() async {
+        let ended = expectation(description: "Drag provider released")
+        let controller = BonsplitController()
+        let transfer = TabTransferData(tabId: TabID(), sourcePaneId: PaneID())
+        controller.internalController.tabDrag = transfer
+        var copy: NSItemProvider?
+        autoreleasepool {
+            let provider = TabDragProvider.make(for: transfer) {
+                controller.internalController.tabDrag = nil
+                ended.fulfill()
+            }
+            copy = provider.copy() as? NSItemProvider
+        }
+        await Task.yield()
+        XCTAssertTrue(copy?.hasItemConformingToTypeIdentifier(TabDragProvider.contentType.identifier) == true)
+        XCTAssertEqual(controller.internalController.tabDrag, transfer)
+
+        copy = nil
+        await fulfillment(of: [ended], timeout: 2)
+        XCTAssertNil(controller.internalController.tabDrag)
+    }
+
+    @MainActor
+    func testAcceptedDropMovesTheTabAfterLoadingTheProvider() async throws {
+        let controller = BonsplitController()
+        let source = try XCTUnwrap(controller.focusedPaneId)
+        let tab = try XCTUnwrap(controller.createTab(title: "Document"))
+        let destination = try XCTUnwrap(controller.splitPane(orientation: .horizontal))
+        let transfer = startDrag(tab, from: source, in: controller)
+        let provider = TabDragProvider.make(for: transfer) {}
+        let moved = expectation(description: "Tab transfer applied")
+
+        XCTAssertTrue(controller.performTabDrop(from: provider) { received in
+            controller.dropTab(received, into: destination, at: nil)
+            moved.fulfill()
+        })
+        XCTAssertNil(controller.internalController.tabDrag)
+        await fulfillment(of: [moved], timeout: 2)
+
+        XCTAssertNil(controller.internalController.pendingTabDrop)
+        XCTAssertEqual(controller.tabs(inPane: destination).map(\.id), [tab])
+        XCTAssertEqual(controller.allTabIds.filter { $0 == tab }.count, 1)
     }
 
     @MainActor

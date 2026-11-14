@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Drop zone positions for creating splits
 enum DropZone: Equatable {
@@ -36,6 +35,7 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
 
     @State private var activeDropZone: DropZone?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isFocused: Bool {
         controller.focusedPaneId == pane.id
@@ -63,6 +63,12 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
     private var contentAreaWithDropZones: some View {
         GeometryReader { geometry in
             let size = geometry.size
+            let dropTarget = UnifiedPaneDropDelegate(
+                size: size,
+                paneId: pane.id,
+                controller: bonsplit,
+                activeDropZone: $activeDropZone
+            )
 
             ZStack {
                 contentArea
@@ -70,12 +76,16 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
                     .simultaneousGesture(TapGesture().onEnded {
                         bonsplit.focusPane(pane.id)
                     })
-                    .onDrop(of: [TabDragProvider.contentType], delegate: UnifiedPaneDropDelegate(
-                        size: size,
-                        paneId: pane.id,
-                        controller: bonsplit,
-                        activeDropZone: $activeDropZone
-                    ))
+
+                if controller.tabDrag != nil {
+                    // Give the entire pane a destination independent of the editor it hosts.
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .frame(width: size.width, height: size.height)
+                        .onDrop(of: [TabDragProvider.contentType], delegate: dropTarget)
+                        .accessibilityHidden(true)
+                }
 
                 // Visual placeholder (non-interactive)
                 dropPlaceholder(for: activeDropZone, in: size)
@@ -85,6 +95,9 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
             .frame(width: size.width, height: size.height)
         }
         .clipped()
+        .onChange(of: controller.tabDrag) { _, transfer in
+            if transfer == nil { activeDropZone = nil }
+        }
     }
 
     // MARK: - Content Area
@@ -125,6 +138,7 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
         let placeholderColor = Color.accentColor.opacity(0.25)
         let borderColor = Color.accentColor
         let padding: CGFloat = 4
+        let animate = bonsplit.configuration.appearance.enableAnimations && !reduceMotion
 
         // Calculate frame based on zone
         let frame: CGRect = {
@@ -153,7 +167,7 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
             .frame(width: width, height: height)
             .position(x: frame.origin.x + width / 2, y: frame.origin.y + height / 2)
             .opacity(zone != nil ? 1 : 0)
-            .animation(.spring(duration: 0.25, bounce: 0.15), value: zone)
+            .animation(animate ? .easeOut(duration: 0.12) : nil, value: zone)
     }
 
     // MARK: - Empty Pane View
@@ -197,13 +211,13 @@ struct UnifiedPaneDropDelegate: DropDelegate {
         activeDropZone = nil
         guard let zone else { return false }
 
-        return TabDragProvider.load(from: info) { transfer in
+        return controller.performTabDrop(info) { transfer in
             if let orientation = zone.orientation {
                 controller.dropTab(transfer, beside: paneId, orientation: orientation, insertFirst: zone.insertsFirst)
-            } else {
-                withAnimation(.spring(duration: 0.3, bounce: 0.15)) {
-                    controller.dropTab(transfer, into: paneId, at: nil)
-                }
+                return
+            }
+            withAnimation(.spring(duration: 0.3, bounce: 0.15)) {
+                controller.dropTab(transfer, into: paneId, at: nil)
             }
         }
     }
@@ -222,10 +236,12 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [TabDragProvider.contentType]) && controller.internalController.tabDrag != nil
+        controller.internalController.tabDrag != nil
+            && info.hasItemsConforming(to: [TabDragProvider.contentType])
     }
 
     func allowedZone(at location: CGPoint) -> DropZone? {
+        guard CGRect(origin: .zero, size: size).contains(location) else { return nil }
         let zone = zoneForLocation(location)
         if zone != .center {
             if controller.canDropTab(into: paneId, splitting: true) { return zone }

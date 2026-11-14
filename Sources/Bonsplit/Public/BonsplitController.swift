@@ -279,6 +279,39 @@ public final class BonsplitController {
         return source.id == paneId ? configuration.allowTabReordering : configuration.allowCrossPaneTabMove
     }
 
+    internal func performTabDrop(
+        _ info: DropInfo,
+        apply: @escaping @MainActor @Sendable (TabTransferData) -> Void
+    ) -> Bool {
+        guard let provider = info.itemProviders(for: [TabDragProvider.contentType]).first else { return false }
+        return performTabDrop(from: provider, apply: apply)
+    }
+
+    internal func performTabDrop(
+        from provider: NSItemProvider,
+        apply: @escaping @MainActor @Sendable (TabTransferData) -> Void
+    ) -> Bool {
+        let splitController = internalController
+        let type = TabDragProvider.contentType.identifier
+        guard let transfer = splitController.tabDrag,
+              provider.hasItemConformingToTypeIdentifier(type) else { return false }
+
+        splitController.pendingTabDrop = transfer
+        splitController.tabDrag = nil
+        provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
+            let received = data.flatMap { try? JSONDecoder().decode(TabTransferData.self, from: $0) }
+            DispatchQueue.main.async {
+                guard splitController.pendingTabDrop == transfer else { return }
+                if received == transfer {
+                    apply(transfer)
+                } else {
+                    splitController.pendingTabDrop = nil
+                }
+            }
+        }
+        return true
+    }
+
     internal func dropTab(_ transfer: TabTransferData, into paneId: PaneID, at index: Int?) {
         guard let source = sourceOfDrop(transfer),
               let destination = internalController.rootNode.findPane(paneId) else { return }
@@ -318,8 +351,9 @@ public final class BonsplitController {
     }
 
     private func sourceOfDrop(_ transfer: TabTransferData) -> PaneState? {
-        guard internalController.tabDrag == transfer else { return nil }
+        guard internalController.tabDrag == transfer || internalController.pendingTabDrop == transfer else { return nil }
         internalController.tabDrag = nil
+        internalController.pendingTabDrop = nil
         return liveSource(for: transfer)
     }
 

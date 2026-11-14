@@ -73,10 +73,12 @@ final class SplitLayoutTests: XCTestCase {
             size: CGSize(width: 400, height: 300), paneId: source,
             controller: controller, activeDropZone: .constant(nil)
         )
-        let edge = CGPoint(x: 380, y: 150)
+        let edge = CGPoint(x: 310, y: 150)
 
         XCTAssertNil(ownPaneDrop.allowedZone(at: edge))
         XCTAssertEqual(otherPaneDrop.allowedZone(at: edge), .right)
+        XCTAssertEqual(otherPaneDrop.allowedZone(at: CGPoint(x: 290, y: 150)), .center)
+        XCTAssertNil(otherPaneDrop.allowedZone(at: CGPoint(x: 405, y: 150)))
         controller.configuration.allowSplits = false
         XCTAssertEqual(otherPaneDrop.allowedZone(at: edge), .center)
         controller.configuration.allowCrossPaneTabMove = false

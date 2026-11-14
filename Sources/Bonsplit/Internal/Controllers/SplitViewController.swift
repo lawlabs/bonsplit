@@ -11,8 +11,11 @@ final class SplitViewController {
     /// Currently focused pane ID
     var focusedPaneId: PaneID?
 
-    /// The latest local drag. Starting another drag replaces it, and a matching drop consumes it.
+    /// The active local drag. The provider clears it when the system releases the drag.
     var tabDrag: TabTransferData?
+
+    /// A drop awaiting its item provider. Starting a new drag invalidates this transfer.
+    @ObservationIgnored var pendingTabDrop: TabTransferData?
 
     /// Current frame of the entire split view container
     var containerFrame: CGRect = .zero

@@ -6,23 +6,32 @@ enum TabDragProvider {
     // Use an existing data type so host apps need no Info.plist declaration.
     static let contentType = UTType.json
 
-    static func make(for transfer: TabTransferData) -> NSItemProvider {
+    static func make(for transfer: TabTransferData, onRelease: @escaping @MainActor @Sendable () -> Void) -> NSItemProvider {
         let provider = NSItemProvider()
-        if let data = try? JSONEncoder().encode(transfer) {
-            provider.registerDataRepresentation(for: contentType, visibility: .ownProcess) { completion in
-                completion(data, nil)
-                return nil
-            }
+        guard let data = try? JSONEncoder().encode(transfer) else {
+            onRelease()
+            return provider
+        }
+        // System copies of the provider also retain its representation.
+        let registration = DragRepresentation(data: data, onRelease: onRelease)
+        provider.registerDataRepresentation(for: contentType, visibility: .ownProcess) { completion in
+            completion(registration.data, nil)
+            return nil
         }
         return provider
     }
 
-    static func load(from info: DropInfo, completion: @escaping @MainActor @Sendable (TabTransferData) -> Void) -> Bool {
-        guard let provider = info.itemProviders(for: [contentType]).first else { return false }
-        provider.loadDataRepresentation(forTypeIdentifier: contentType.identifier) { data, _ in
-            guard let data, let transfer = try? JSONDecoder().decode(TabTransferData.self, from: data) else { return }
-            DispatchQueue.main.async { completion(transfer) }
+    private final class DragRepresentation: Sendable {
+        let data: Data
+        let onRelease: @MainActor @Sendable () -> Void
+
+        init(data: Data, onRelease: @escaping @MainActor @Sendable () -> Void) {
+            self.data = data
+            self.onRelease = onRelease
         }
-        return true
+
+        deinit {
+            DispatchQueue.main.async { [onRelease] in onRelease() }
+        }
     }
 }

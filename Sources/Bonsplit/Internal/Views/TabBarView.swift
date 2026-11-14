@@ -130,9 +130,13 @@ struct TabBarView: View {
 
     private func createItemProvider(for tab: TabItem) -> NSItemProvider {
         let transfer = TabTransferData(tabId: TabID(id: tab.id), sourcePaneId: pane.id)
+        splitViewController.pendingTabDrop = nil
         splitViewController.tabDrag = transfer
 
-        return TabDragProvider.make(for: transfer)
+        return TabDragProvider.make(for: transfer) { [weak splitViewController] in
+            guard splitViewController?.tabDrag == transfer else { return }
+            splitViewController?.tabDrag = nil
+        }
     }
 
     // MARK: - Drop Zone at End
@@ -253,7 +257,7 @@ struct TabDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         dropTargetIndex = nil
         guard controller.canDropTab(into: paneId) else { return false }
-        return TabDragProvider.load(from: info) { transfer in
+        return controller.performTabDrop(info) { transfer in
             withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
                 controller.dropTab(transfer, into: paneId, at: targetIndex)
             }
@@ -275,6 +279,7 @@ struct TabDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [TabDragProvider.contentType]) && controller.canDropTab(into: paneId)
+        controller.canDropTab(into: paneId)
+            && info.hasItemsConforming(to: [TabDragProvider.contentType])
     }
 }
